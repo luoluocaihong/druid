@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2017 Alibaba Group Holding Ltd.
+ * Copyright 1999-2018 Alibaba Group Holding Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,6 +41,7 @@ import com.alibaba.druid.sql.dialect.postgresql.ast.stmt.PGSelectQueryBlock.Fetc
 import com.alibaba.druid.sql.dialect.postgresql.ast.stmt.PGSelectQueryBlock.ForClause;
 import com.alibaba.druid.sql.dialect.postgresql.ast.stmt.PGSelectQueryBlock.WindowClause;
 import com.alibaba.druid.sql.visitor.SQLASTOutputVisitor;
+import com.alibaba.druid.util.FnvHash;
 import com.alibaba.druid.util.JdbcConstants;
 
 import java.util.LinkedHashSet;
@@ -305,6 +306,42 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
             }
         }
 
+        List<SQLExpr> onConflictTarget = x.getOnConflictTarget();
+        List<SQLUpdateSetItem> onConflictUpdateSetItems = x.getOnConflictUpdateSetItems();
+        boolean onConflictDoNothing = x.isOnConflictDoNothing();
+
+        if (onConflictDoNothing
+                || (onConflictTarget != null && onConflictTarget.size() > 0)
+                || (onConflictUpdateSetItems != null && onConflictUpdateSetItems.size() > 0)) {
+            println();
+            print0(ucase ? "ON CONFLICT" : "on conflict");
+
+            if ((onConflictTarget != null && onConflictTarget.size() > 0)) {
+                print0(" (");
+                printAndAccept(onConflictTarget, ", ");
+                print(')');
+            }
+
+            SQLName onConflictConstraint = x.getOnConflictConstraint();
+            if (onConflictConstraint != null) {
+                print0(ucase ? " ON CONSTRAINT " : " on constraint ");
+                printExpr(onConflictConstraint);
+            }
+
+            SQLExpr onConflictWhere = x.getOnConflictWhere();
+            if (onConflictWhere != null) {
+                print0(ucase ? " WHERE " : " where ");
+                printExpr(onConflictWhere);
+            }
+
+            if (onConflictDoNothing) {
+                print0(ucase ? " DO NOTHING" : " do nothing");
+            } else if ((onConflictUpdateSetItems != null && onConflictUpdateSetItems.size() > 0)) {
+                print0(ucase ? " UPDATE SET " : " update set ");
+                printAndAccept(onConflictUpdateSetItems, ", ");
+            }
+        }
+
         if (x.getReturning() != null) {
             println();
             print0(ucase ? "RETURNING " : "returning ");
@@ -417,17 +454,32 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
     @Override
     public boolean visit(PGTypeCastExpr x) {
         SQLExpr expr = x.getExpr();
+        SQLDataType dataType = x.getDataType();
+
+        if (dataType.nameHashCode64() == FnvHash.Constants.VARBIT) {
+            dataType.accept(this);
+            print(' ');
+            printExpr(expr);
+            return false;
+        }
+
         if (expr != null) {
             if (expr instanceof SQLBinaryOpExpr) {
                 print('(');
                 expr.accept(this);
                 print(')');
+            } else if (expr instanceof PGTypeCastExpr && dataType.getArguments().size() == 0) {
+                dataType.accept(this);
+                print('(');
+                visit((PGTypeCastExpr) expr);
+                print(')');
+                return false;
             } else {
                 expr.accept(this);
             }
         }
         print0("::");
-        x.getDataType().accept(this);
+        dataType.accept(this);
         return false;
     }
 
@@ -596,6 +648,18 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
     @Override
     public boolean visit(PGStartTransactionStatement x) {
         print0(ucase ? "START TRANSACTION" : "start transaction");
+        return false;
+    }
+
+    @Override
+    public void endVisit(PGConnectToStatement x) {
+
+    }
+
+    @Override
+    public boolean visit(PGConnectToStatement x) {
+        print0(ucase ? "CONNECT TO " : "connect to ");
+        x.getTarget().accept(this);
         return false;
     }
 
@@ -1739,7 +1803,7 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
             if (count != 0) {
                 print0(", ");
             }
-            print0(ucase ? "FOREIGHN KEY" : "foreighn key");
+            print0(ucase ? "FOREIGN KEY" : "foreign key");
             count++;
         }
 
@@ -1834,28 +1898,6 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
 
     @Override
     public void endVisit(OracleCreateTableStatement.Organization x) {
-
-    }
-
-    @Override
-    public boolean visit(OracleCreateTableStatement.OracleExternalRecordFormat x) {
-        if (x.getDelimitedBy() != null) {
-            println();
-            print0(ucase ? "RECORDS DELIMITED BY " : "records delimited by ");
-            x.getDelimitedBy().accept(this);
-        }
-
-        if (x.getTerminatedBy() != null) {
-            println();
-            print0(ucase ? "FIELDS TERMINATED BY " : "fields terminated by ");
-            x.getTerminatedBy().accept(this);
-        }
-
-        return false;
-    }
-
-    @Override
-    public void endVisit(OracleCreateTableStatement.OracleExternalRecordFormat x) {
 
     }
 
@@ -2203,9 +2245,11 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
             print0(ucase ? "MONITORING" : "monitoring");
         }
 
-        if (x.getPartitioning() != null) {
+        SQLPartitionBy partitionBy = x.getPartitioning();
+        if (partitionBy != null) {
             println();
-            x.getPartitioning().accept(this);
+            print0(ucase ? "PARTITION BY " : "partition by ");
+            partitionBy.accept(this);
         }
 
         if (x.getCluster() != null) {
@@ -2223,6 +2267,7 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
             println();
             x.getSelect().accept(this);
         }
+
         return false;
     }
 
@@ -2942,5 +2987,54 @@ public class PGOutputVisitor extends SQLASTOutputVisitor implements PGASTVisitor
         println();
         print0(ucase ? "END IF" : "end if");
         return false;
+    }
+
+    @Override
+    public boolean visit(SQLCreateIndexStatement x) {
+        print0(ucase ? "CREATE " : "create ");
+        if (x.getType() != null) {
+            print0(x.getType());
+            print(' ');
+        }
+
+        print0(ucase ? "INDEX " : "index ");
+
+        x.getName().accept(this);
+
+        if (x.getUsing() != null) {
+            print0(ucase ? " USING " : " using ");
+            ;
+            print0(x.getUsing());
+        }
+
+        print0(ucase ? " ON " : " on ");
+        x.getTable().accept(this);
+        print0(" (");
+        printAndAccept(x.getItems(), ", ");
+        print(')');
+
+        SQLExpr comment = x.getComment();
+        if (comment != null) {
+            print0(ucase ? " COMMENT " : " comment ");
+            comment.accept(this);
+        }
+
+        return false;
+    }
+
+    @Override
+    public boolean visit(SQLAlterTableAddColumn x) {
+        boolean odps = isOdps();
+        print0(ucase ? "ADD COLUMN " : "add column ");
+        printAndAccept(x.getColumns(), ", ");
+        return false;
+    }
+
+    protected void visitAggreateRest(SQLAggregateExpr x) {
+        SQLOrderBy orderBy = x.getWithinGroup();
+        if (orderBy != null) {
+            print(' ');
+            orderBy.accept(this);
+        }
     }
 }
